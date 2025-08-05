@@ -1,0 +1,13 @@
+.vscode/*
+.locks/
+allenai/
+cache/
+**/__pycache__
+utils/c4-*
+compressed_models/
+error_metrics/
+figures/
+my_3d_importance_plots/
+scripts/
+wikitext/
+*.pt
