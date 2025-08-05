@@ -1,6 +1,6 @@
 # CPSVD: Enhancing Large Language Model Compression via Column-Preserving Singular Value Decomposition
 
-This repository provides the official implementation of **CPSVD**, a novel method for compressing large language models (LLMs) by combining column selection and SVD-based low-rank approximation. CPSVD is designed to preserve important structural information in the weight matrices, enabling efficient compression without sacrificing performance.
+This repository provides the official implementation of CPSVD, a novel method for compressing large language models (LLMs) by combining column selection and SVD-based low-rank approximation. CPSVD is designed to preserve important structural information in the weight matrices, enabling efficient compression without sacrificing performance.
 
 ## 🚀 Quick Start
 
@@ -28,7 +28,7 @@ pip install -r requirements.txt
 ## 📖 Example
 You can run the main script with the following command:
 ```bash
-python SVDLLM.py --model /models/Llama-7b --ratio 0.4 --step -1 --trunc_rank_method cos --t 0.1 --matrices_optimized --eval_ppl --eval_zero_shot --cuda_devices 0
+python CPSVD.py --model /models/Llama-7b --ratio 0.4 --step -1 --trunc_rank_method cos --t 0.1 --matrices_optimized --eval_ppl --eval_zero_shot --cuda_devices 0
 ```
 
 By default, the results are saved in a format compatible with the ``` transformers``` library.
