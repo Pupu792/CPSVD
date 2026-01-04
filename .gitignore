@@ -11,3 +11,7 @@ my_3d_importance_plots/
 scripts/
 wikitext/
 *.pt
+alpaca/
+bash/
+test.py
+logs/

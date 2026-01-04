@@ -28,7 +28,8 @@ def llama_sequential(model, dataloader, dev):
     inps = torch.zeros(
         (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
-    cache = {'i': 0, 'attention_mask': None}
+    cache = {'i': 0, 'attention_mask': None, "position_ids": None, 
+             'position_embeddings': None}
 
     class Catcher(nn.Module):
         def __init__(self, module):
@@ -38,7 +39,9 @@ def llama_sequential(model, dataloader, dev):
             inps[cache['i']] = inp
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
-            cache['position_ids'] = kwargs['position_ids']
+            cache['position_ids'] = kwargs.get('position_ids', None)
+            cache['position_embeddings'] = kwargs.get(
+                'position_embeddings', None)
             raise ValueError
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
@@ -56,6 +59,7 @@ def llama_sequential(model, dataloader, dev):
     outs = torch.zeros_like(inps)
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
+    position_embeddings = cache['position_embeddings']
 
     print('Ready.')
 
@@ -66,16 +70,19 @@ def llama_sequential(model, dataloader, dev):
 
         if args.true_sequential:
             sequential = [
-                ['self_attn.k_u_proj','self_attn.k_v_proj', 'self_attn.v_u_proj', 'self_attn.v_v_proj', 'self_attn.q_u_proj', 'self_attn.q_v_proj'],
-                ['self_attn.o_u_proj', 'self_attn.o_v_proj'],
-                ['mlp.up_u_proj', 'mlp.up_v_proj', 'mlp.gate_u_proj', 'mlp.gate_v_proj'],
-                ['mlp.down_u_proj', 'mlp.down_v_proj']
+                ['self_attn.k_proj.u_proj','self_attn.k_proj.v_proj','self_attn.k_proj.col_proj','self_attn.k_proj', 
+                 'self_attn.v_proj.u_proj', 'self_attn.v_proj.v_proj','self_attn.v_proj.col_proj','self_attn.v_proj', 
+                 'self_attn.q_proj.u_proj', 'self_attn.q_proj.v_proj','self_attn.q_proj.col_proj','self_attn.q_proj',],
+                ['self_attn.o_proj.u_proj', 'self_attn.o_proj.v_proj','self_attn.o_proj.col_proj', 'self_attn.o_proj'],
+                ['mlp.up_proj.u_proj', 'mlp.up_proj.v_proj','mlp.up_proj.col_proj', 'mlp.up_proj', 
+                 'mlp.gate_proj.u_proj', 'mlp.gate_proj.v_proj', 'mlp.gate_proj.col_proj', 'mlp.gate_proj'],
+                ['mlp.down_proj.u_proj', 'mlp.down_proj.v_proj', 'mlp.down_proj.col_proj', 'mlp.down_proj']
             ]
         else:
             sequential = [list(full.keys())]
        
         for names in sequential:
-            subset = {n: full[n] for n in names}
+            subset = {n: full[n] for n in names if n in full}
 
             gptq = {}
             for name in subset:
@@ -93,7 +100,7 @@ def llama_sequential(model, dataloader, dev):
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
             for j in range(args.nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids, position_embeddings=position_embeddings)[0]
             for h in handles:
                 h.remove()
 
@@ -107,7 +114,7 @@ def llama_sequential(model, dataloader, dev):
                 gptq[name].free()
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids, position_embeddings=position_embeddings)[0]
 
         layers[i] = layer.cpu()
         del layer
@@ -295,7 +302,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    model, tokenizer = get_model_from_local(args.model_path)
+    model, tokenizer = get_model_from_huggingface(args.model_path, device_map='cpu')
     model.eval()
     
     dataloader, testloader = get_loaders(args.dataset, nsamples=args.nsamples, seed=args.seed, tokenizer=tokenizer)
@@ -307,9 +314,12 @@ if __name__ == '__main__':
     # if args.save:
     #     llama_pack3(model, quantizers)
     #     torch.save(model.state_dict(), args.save)
-    ppl_eval(model, tokenizer, datasets=['wikitext2'], model_seq_len=2048, batch_size=16, device=args.DEV)
-    torch.save({
-                'model': model,
-                'tokenizer': tokenizer
-            }, args.save) 
+    model = model.half()
+    torch.cuda.empty_cache()
+
+    model = model.to('cuda')
+    
+    ppl_eval(model, tokenizer, datasets=['wikitext2'], model_seq_len=4096, batch_size=1, device=args.DEV)
+    model.save_pretrained(args.save)
+    tokenizer.save_pretrained(args.save)
 

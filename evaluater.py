@@ -22,22 +22,23 @@ def evaluate_perplexity(model, dataset, limit):
 
     nlls = []
 
+    loss_fct = nn.CrossEntropyLoss()
     for i in range(nsamples):
         if i == limit:
             break
         input_ids = dataset[i : i + 1, :-1].to(model.device)
         labels = dataset[i : i + 1, 1:].contiguous()
-        logits = model(input_ids=input_ids)[0]
-        shift_logits = logits[:, :, :]
+        logits = model(input_ids=input_ids).logits
+        shift_logits = logits
         shift_labels = labels.to(model.device)
-        loss_fct = nn.CrossEntropyLoss()
+        
         loss = loss_fct(
             shift_logits.view(-1, shift_logits.size(-1)),
             shift_labels.view(-1),
         )
-        neg_log_likelihood = loss.float() * seqlen
+        neg_log_likelihood = loss.float() 
         nlls.append(neg_log_likelihood)
-    ppl = torch.exp(torch.stack(nlls).sum() / (len(nlls) * seqlen))
+    ppl = torch.exp(torch.stack(nlls).mean())
     return ppl.item()
 
 
@@ -152,7 +153,7 @@ def ppl_eval_large(model, tokenizer, datasets=['wikitext2', 'ptb', 'c4'], seq_le
     print("Weight Memory: {} MiB\n".format(torch.cuda.memory_allocated()/1024/1024))
 
 @torch.no_grad()
-def eff_eval(model, tokenizer, dataset='wikitext2', original_len=4, generated_len=128, batch_size=1, device="cuda"):
+def eff_eval(model, tokenizer, dataset='wikitext2', original_len=4095, generated_len=1, batch_size=1, device="cuda"):
     model.eval()
     throughput = 0
     token_num = 0
@@ -190,7 +191,124 @@ def eff_eval(model, tokenizer, dataset='wikitext2', original_len=4, generated_le
         print("Weight Memory: {} GB".format(weight_memory/(1024 ** 3)))
         print("Activation Memory: {} GB".format((end_memory - start_memory)/(1024 ** 3)))
         print("Throughput: {} tokens/sec".format(token_num / throughput))
+
+
+@torch.no_grad()
+def prefilling_decoding_eval(model, tokenizer, dataset='wikitext2', original_len=2048, generated_len=1, batch_size=1, device="cuda"):
+    model.eval()
+    
+    # --- 统计累加器 ---
+    total_prefill_latency = 0  # 累计 Prefill 总耗时
+    total_decode_latency = 0   # 累计 Decode 总耗时
+    total_decode_tokens = 0    # 累计生成的 token 数量
+    valid_step_count = 0       # 有效的 batch 计数
+    
+    num_batches_to_fetch = 10
+    # 假设 get_test_data 已经定义好
+    test_loader = get_test_data(dataset, tokenizer, seq_len=original_len, batch_size=batch_size)
+    
+    weight_memory = torch.cuda.memory_allocated()
+    
+    print(f"Starting evaluation: Prompt Len={original_len}, Gen Len={generated_len}")
+    print(f"Note: Batch 0 will be skipped for statistics (Warmup).")
+
+    for batch_idx, batch_data in enumerate(itertools.islice(test_loader, num_batches_to_fetch)):
+        input_ids = batch_data.to(device) # Shape: [batch, seq_len]
         
+        # 清理显存
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(0)
+        
+        # ==========================================
+        # 阶段 1: Prefilling (处理 Prompt)
+        # ==========================================
+        torch.cuda.synchronize()
+        prefill_start = time.time()
+        
+        outputs = model(input_ids, use_cache=True)
+        
+        torch.cuda.synchronize()
+        prefill_end = time.time()
+        
+        cur_prefill_time = prefill_end - prefill_start
+        
+        # 准备 Decoding 输入
+        past_key_values = outputs.past_key_values
+        next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1).unsqueeze(-1)
+
+        # ==========================================
+        # 阶段 2: Decoding (自回归生成)
+        # ==========================================
+        cur_decode_time = 0
+        if generated_len > 0:
+            torch.cuda.synchronize()
+            decode_start = time.time()
+            
+            for _ in range(generated_len):
+                outputs = model(next_token, past_key_values=past_key_values, use_cache=True)
+                past_key_values = outputs.past_key_values
+                next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1).unsqueeze(-1)
+            
+            torch.cuda.synchronize()
+            decode_end = time.time()
+            cur_decode_time = decode_end - decode_start
+
+        # 获取峰值显存
+        end_memory = torch.cuda.max_memory_allocated(0)
+
+        # ==========================================
+        # 数据统计 (跳过第 0 个 Batch)
+        # ==========================================
+        is_warmup = (batch_idx == 0)
+        
+        if not is_warmup:
+            total_prefill_latency += cur_prefill_time
+            total_decode_latency += cur_decode_time
+            # 注意：batch_size 可能大于 1，总 token 数 = batch * gen_len
+            current_generated_tokens = input_ids.shape[0] * generated_len
+            total_decode_tokens += current_generated_tokens
+            valid_step_count += 1
+
+        # ==========================================
+        # 实时打印
+        # ==========================================
+        status_tag = "[WARMUP]" if is_warmup else "[RECORDED]"
+        print(f"Batch {batch_idx} {status_tag}:")
+        print(f"  Prefill Latency   : {cur_prefill_time:.4f} s")
+        
+        if generated_len > 0 and cur_decode_time > 0:
+            # 计算当前 batch 的 Throughput
+            # token_count = batch_size * generated_len
+            batch_tokens = input_ids.shape[0] * generated_len
+            batch_throughput = batch_tokens / cur_decode_time
+            print(f"  Decode Throughput : {batch_throughput:.2f} tokens/s (Time: {cur_decode_time:.4f} s)")
+        
+        print(f"  Peak Memory       : {end_memory / (1024**3):.2f} GB")
+
+        if batch_idx >= 5: 
+            break
+
+    # ==========================================
+    # 最终汇总
+    # ==========================================
+    print("\n====== Final Statistics (Excluding First Batch) ======")
+    if valid_step_count > 0:
+        # 1. Prefill: 平均 Latency
+        avg_prefill_time = total_prefill_latency / valid_step_count
+        print(f"Avg Prefill Latency   : {avg_prefill_time:.4f} s / batch")
+        
+        # 2. Decode: 平均 Throughput
+        if total_decode_latency > 0:
+            # 总 token 数 / 总时间
+            avg_decode_throughput = total_decode_tokens / total_decode_latency
+            print(f"Avg Decode Throughput : {avg_decode_throughput:.2f} tokens/s")
+        
+        # 3. Memory
+        print(f"Max Memory Used       : {end_memory / (1024 ** 3):.2f} GB")
+        print(f"Weight Memory         : {weight_memory / (1024 ** 3):.2f} GB")
+    else:
+        print("No valid batches collected.")
+
 
 @torch.no_grad()
 def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq","rte","hellaswag","winogrande","arc_challenge","arc_easy","openbookqa"], 

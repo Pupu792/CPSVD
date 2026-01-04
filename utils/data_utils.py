@@ -4,6 +4,7 @@ import torch
 import sys
 from datasets import load_dataset
 from torch.utils.data.dataset import Dataset
+import re
 
 current_path = os.path.dirname(os.path.abspath(__file__))
 parent_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -12,15 +13,15 @@ sys.path.append(current_path)
 def get_calib_train_data(name, tokenizer, nsamples, seqlen=2048, seed=3, batch_size=1, dataset_cache_dir=None):
     import random
     random.seed(seed)
-    cache_file = (
-        f"cache/{name}_{nsamples}_{seqlen}_{seed}_{batch_size}.pt"
-    )
+    # cache_file = (
+    #     f"cache/{name}_{nsamples}_{seqlen}_{seed}_{batch_size}.pt"
+    # )
     nsamples += 1 #############################
-    if not os.path.exists("cache"):
-        os.makedirs("cache")
-    if os.path.exists(cache_file):
-        traindataset = torch.load(cache_file)
-        return traindataset
+    # if not os.path.exists("cache"):
+    #     os.makedirs("cache")
+    # if os.path.exists(cache_file):
+    #     traindataset = torch.load(cache_file)
+        # return traindataset
     if name == "c4":
         # traindata = load_dataset("json", data_files="utils/c4-train.json")['train']
         traindata = load_dataset('allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train')
@@ -31,27 +32,23 @@ def get_calib_train_data(name, tokenizer, nsamples, seqlen=2048, seed=3, batch_s
     elif name == "wikitext2":
         traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train", cache_dir=dataset_cache_dir)
         tot_text = "\n\n".join(traindata["text"])
+    elif name == 'alpaca':
+        traindata = load_dataset("parquet", data_files={'train': 'alpaca/train-00000-of-00001-a09b74b3ef9c3b56.parquet'})['train']
+        traindata = traindata.remove_columns([col for col in ["instruction", "input", "output"] if col in traindata.column_names])
+        tot_text = "\n\n".join(traindata["text"])
     else:
         raise NotImplementedError
     traindataset = []
-    for s in range(nsamples):
+    while (len(traindataset) < nsamples):
         i = random.randint(0, len(tot_text) - seqlen - 1)
         j = i + seqlen * 10
-        txt = tot_text[i:j]
-        ind = txt.find('.')
-        txt = txt[ind + 1 :].strip()
-        trainenc = tokenizer(txt, return_tensors="pt")
+        trainenc = tokenizer(tot_text[i:j], return_tensors="pt")
         if trainenc.input_ids.shape[1] < seqlen:
-            s = s - 1
             continue
-        if s % batch_size == 0:
-            if s != 0:
-                attention_mask = torch.ones_like(inp)
-                traindataset.append({"input_ids": inp, "attention_mask": attention_mask})
-            inp = trainenc.input_ids[:, :seqlen]
-        else:
-            inp = torch.cat((inp, trainenc.input_ids[:, :seqlen]), dim=0)
-    torch.save(traindataset, cache_file)
+        inp = trainenc.input_ids[:, :seqlen]
+        attention_mask = torch.ones_like(inp)
+        traindataset.append(
+            {"input_ids": inp, "attention_mask": attention_mask})
     return traindataset
 
 
@@ -127,7 +124,7 @@ def get_c4(nsamples, seed, seqlen, tokenizer):
         while True:
             i = random.randint(0, len(valdata) - 1)
             tmp = tokenizer(valdata[i]['text'], return_tensors='pt')
-            if tmp.input_ids.shape[1] >= seqlen:
+            if tmp.input_ids.shape[1] >= seqlen + 1:
                 break
         i = random.randint(0, tmp.input_ids.shape[1] - seqlen - 1)
         j = i + seqlen

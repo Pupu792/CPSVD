@@ -1,46 +1,94 @@
-# CPSVD: Enhancing Large Language Model Compression via Column-Preserving Singular Value Decomposition
+# Duo-SVD
 
-This repository provides the official implementation of CPSVD, a novel method for compressing large language models (LLMs) by combining column selection and SVD-based low-rank approximation. CPSVD is designed to preserve important structural information in the weight matrices, enabling efficient compression without sacrificing performance.
+This repository provides the official implementation of the article: **Beyond Uniform SVD: Dual-Level Optimization across Columns and Modules for LLM Compression**.
 
 ## 🚀 Quick Start
 
 ### 1. Installation
 
-Create and activate a conda environment:
+Create and activate a conda environment, then install the required dependencies.
 
 ```bash
-conda create -n cpsvd python=3.9
-conda activate cpsvd
-```
+# Create environment
+conda create -n duo-svd python=3.9.20
+conda activate duo-svd
 
-Clone the repository:
-
-```bash
-git clone https://github.com/Pupu792/CPSVD.git
-cd CPSVD
-```
-
-Install the required dependencies:
-```bash
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-## 📖 Example
-You can run the main script with the following command:
+### 2. Usage Pipeline
+
+The compression workflow consists of three preparation steps followed by evaluation.
+
+#### Step 1: Get Hessian Matrix
+Collect the Hessian matrix corresponding to the weight matrix.
+
 ```bash
-python CPSVD.py --model /models/Llama-7b --ratio 0.4 --step -1 --trunc_rank_method cos --t 0.1 --matrices_optimized --eval_ppl --eval_zero_shot --cuda_devices 0
+python Duo-SVD.py \
+    --step 1 \
+    --model /path/to/source_model \
+    --dataset wikitext2 \
+    --save_path /path/to/save_hessian
 ```
 
-By default, the results are saved in a format compatible with the ``` transformers``` library.
+#### Step 2: Calculate Module Sensitivity
+Calculate the perturbation for each module under the target compression ratio.
 
-**Note:** If you need to save the decomposed version, set the `--step` argument to `0` and modify the `transformers` library to version `4.35.2`. For detailed instructions, please refer to the original project: [SVD-LLM](https://github.com/AIoT-MLSys-Lab/SVD-LLM).
+```bash
+python Duo-SVD.py \
+    --step 2 \
+    --model /path/to/source_model \
+    --hessian_mat_path /path/to/save_hessian \
+    --dataset wikitext2 \
+    --whitening_nsamples 32 \
+    --model_seq_len 2048 \
+    --ratio 0.8 \
+```
+> **Note:** Replace `0.8` with your target compression ratio. Ensure you verify where the sensitivity results are saved (referenced as `sensitivity_path` in the next step).
 
+#### Step 3: Compress Model
+Perform the model compression.
 
-## 📊 Evaluation
+```bash
+python Duo-SVD.py \
+    --step 3 \
+    --model /path/to/source_model \
+    --hessian_mat_path /path/to/save_hessian \
+    --ratio 0.8 \
+    --strategy dp \
+    --sensitivity_path /path/to/save_sensitivity \
+    --save_path /path/to/save_compressed_model
+```
 
-For evaluating zero-shot tasks, we adopt the methods used in the [wanda](https://github.com/locuslab/wanda) repository.
+#### Step 4-6: Evaluation
+Evaluate the compressed model generated in Step 3.
 
----
-## 🙏 Acknowledgments
+**Evaluate Perplexity (Step 4)**
+```bash
+python Duo-SVD.py \
+    --step 4 \
+    --model_path /path/to/save_compressed_model
+```
 
-This repository is built upon the foundational work of [SVD-LLM](https://github.com/AIoT-MLSys-Lab/SVD-LLM).
+**Evaluate Inference Performance (Step 5)**
+Measure latency and throughput with specific generation settings.
+```bash
+python Duo-SVD.py \
+    --step 5 \
+    --model_path /path/to/save_compressed_model \
+    --prefilling_len 256 \
+    --gen_seq_len 64 \
+    --eval_batch_size 24
+```
+
+**Evaluate Downstream Tasks (Step 6)**
+```bash
+python Duo-SVD.py \
+    --step 6 \
+    --model_path /path/to/save_compressed_model
+```
+
+## 📜 License
+
+This project is licensed under the [Apache 2.0 License](LICENSE).
